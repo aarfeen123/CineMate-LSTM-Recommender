@@ -176,7 +176,7 @@ def load_model_and_data():
     # ── Model ──
     model_path = 'cinemate_lstm_model.keras'
     if os.path.exists(model_path):
-        model = tf.keras.models.load_model(model_path)
+        model = tf.keras.models.load_model(model_path, compile=False)
     else:
         st.error(f"🚨 Model file '{model_path}' NOT found! Please upload it to GitHub.")
         st.stop()
