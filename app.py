@@ -123,7 +123,7 @@ GENRES = ['Action','Adventure','Animation',"Children's",'Comedy','Crime',
 
 @st.cache_resource(show_spinner="⚙️ Loading AI model...")
 def load_model_and_data():
-    """Load or train a lightweight LSTM model."""
+    """Load architecture and populate weights from the .keras file."""
     import tensorflow as tf
     from tensorflow.keras.models import Sequential
     from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout
@@ -133,7 +133,7 @@ def load_model_and_data():
     if not os.path.exists('ml-1m'):
         with st.spinner('⬇️ Downloading MovieLens 1M dataset (first run only)...'):
             r = requests.get('https://files.grouplens.org/datasets/movielens/ml-1m.zip',
-                             stream=True)
+                              stream=True)
             with open('ml-1m.zip', 'wb') as f:
                 for chunk in r.iter_content(65536): f.write(chunk)
             with zipfile.ZipFile('ml-1m.zip') as z: z.extractall('.')
@@ -148,7 +148,6 @@ def load_model_and_data():
     df['primary_genre'] = df['genres'].apply(lambda x: x.split('|')[0])
     df = df.sort_values(['user_id','timestamp']).reset_index(drop=True)
 
-    # keep active users
     uc = df['user_id'].value_counts()
     df = df[df['user_id'].isin(uc[uc >= 10].index)]
 
@@ -157,7 +156,30 @@ def load_model_and_data():
     NUM_GENRES = len(le.classes_)
     SEQ_LEN    = 10
 
-    # ── Build sequences ──
+    # ── Reconstruct Architecture (to avoid Keras version TypeError) ──
+    model = Sequential([
+        Embedding(input_dim=NUM_GENRES, output_dim=50, input_length=SEQ_LEN),
+        LSTM(128, return_sequences=True),
+        Dropout(0.2),
+        LSTM(128, return_sequences=False),
+        Dropout(0.2),
+        Dense(64, activation='relu'),
+        Dense(NUM_GENRES, activation='softmax')
+    ])
+
+    model_path = 'cinemate_lstm_model.keras'
+    if os.path.exists(model_path):
+        try:
+            # Try loading weights only - this is safer for Keras 2/3 compatibility
+            model.load_weights(model_path)
+        except:
+            # Fallback if full model loading is required
+            model = tf.keras.models.load_model(model_path, compile=False)
+    else:
+        st.error(f"🚨 Model file '{model_path}' NOT found! Please upload it to GitHub.")
+        st.stop()
+
+    # ── Data Processing for Validation ──
     X_seqs, y_labels = [], []
     for _, grp in df.groupby('user_id'):
         gs = grp['genre_id'].tolist()
@@ -165,43 +187,13 @@ def load_model_and_data():
             X_seqs.append(gs[i:i+SEQ_LEN])
             y_labels.append(gs[i+SEQ_LEN])
 
-    X = np.array(X_seqs)
     from tensorflow.keras.utils import to_categorical
-    y = to_categorical(y_labels, num_classes=NUM_GENRES)
+    y_val_cat = to_categorical(y_labels, num_classes=NUM_GENRES)
+    
+    # Simple split for metrics display
+    X_v = np.array(X_seqs[-500:]) 
+    y_v = y_val_cat[-500:]
 
-    from sklearn.model_selection import train_test_split
-    X_tr, X_v, y_tr, y_v = train_test_split(X, y, test_size=0.2,
-                                              random_state=42)
-
-    # ── Model ──
-    model_path = 'cinemate_lstm_model.h5'
-    if os.path.exists(model_path):
-        model = tf.keras.models.load_model(model_path, compile=False)
-    else:
-        st.error(f"🚨 Model file '{model_path}' NOT found! Please upload it to GitHub.")
-        st.stop()
-    """else:
-        model = Sequential([
-            Embedding(NUM_GENRES, 50, input_length=SEQ_LEN),
-            LSTM(128, return_sequences=True),
-            Dropout(0.2),
-            LSTM(128, return_sequences=False),
-            Dropout(0.2),
-            Dense(64, activation='relu'),
-            Dense(NUM_GENRES, activation='softmax')
-        ])
-        model.compile(optimizer='adam', loss='categorical_crossentropy',
-                      metrics=['accuracy'])
-
-        from tensorflow.keras.callbacks import EarlyStopping
-        model.fit(X_tr, y_tr, validation_data=(X_v, y_v),
-                  epochs=50, batch_size=64,
-                  callbacks=[EarlyStopping(monitor='val_loss', patience=5,
-                                           restore_best_weights=True)],
-                  verbose=0)
-        model.save(model_path)"""
-
-    # ── Movie DB ──
     avg_rat = ratings.groupby('movie_id')['rating'].agg(['mean','count']).reset_index()
     avg_rat.columns = ['movie_id','avg_rating','rating_count']
     movies['primary_genre'] = movies['genres'].apply(lambda x: x.split('|')[0])
@@ -248,11 +240,9 @@ with st.sidebar:
 
     st.markdown("### 🏫 About")
     st.markdown("""
-    **Mohammad Arfeen**  
-    B.Tech CS, MANUU  
+    **Mohammad Arfeen** B.Tech CS, MANUU  
     
-    **Afrah Fathima**  
-    Assistant Professor, MANUU  
+    **Afrah Fathima** Assistant Professor, MANUU  
     
     📄 Published at **ICCMDN-2025**
     """)
@@ -261,8 +251,6 @@ with st.sidebar:
     st.markdown("### 🔧 Settings")
     top_genres    = st.slider("Top genres to predict", 1, 5, 3)
     movies_pg     = st.slider("Movies per genre",      1, 8, 4)
-    show_eda      = st.checkbox("Show EDA charts",     False)
-    show_metrics  = st.checkbox("Show model metrics",  False)
     st.markdown("---")
 
     st.markdown("### ℹ️ How it works")
@@ -412,17 +400,6 @@ with tab1:
         else:
             st.info("👈 Build your watch history on the left and click **Get My Recommendations!**")
 
-            # Show example
-            st.markdown("#### 💡 Example Output Preview")
-            example_genres = ['Drama','Romance','Comedy','Drama','Thriller']
-            ex_pred = predict_genres(model, le, example_genres, SEQ_LEN, top_k=3)
-            st.caption(f"*For: {' → '.join(example_genres)}*")
-            for g, c in ex_pred:
-                st.markdown(f'<span class="genre-badge">{g}</span>'
-                            f'<span class="conf-badge">{c*100:.1f}%</span>',
-                            unsafe_allow_html=True)
-                st.progress(c)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 2 — EDA
@@ -438,7 +415,6 @@ with tab2:
 
     col_eda1, col_eda2 = st.columns(2)
 
-    # Genre Distribution
     with col_eda1:
         st.markdown("#### Genre Distribution")
         fig, ax = plt.subplots(figsize=(7, 5))
@@ -455,7 +431,6 @@ with tab2:
         st.pyplot(fig)
         plt.close()
 
-    # Rating Distribution
     with col_eda2:
         st.markdown("#### Rating Distribution")
         fig2, ax2 = plt.subplots(figsize=(7, 5))
@@ -473,31 +448,6 @@ with tab2:
         plt.tight_layout()
         st.pyplot(fig2)
         plt.close()
-
-    # Genre Transition Heatmap
-    st.markdown("#### Genre Transition Matrix (Top 8 Genres — mood shift patterns)")
-    top8 = genre_counts.head(8).index.tolist()
-    trans = {g: {g2: 0 for g2 in top8} for g in top8}
-    for _, grp in df[df['primary_genre'].isin(top8)].groupby('user_id'):
-        seq = grp['primary_genre'].tolist()
-        for a, b in zip(seq, seq[1:]):
-            if a in trans and b in trans: trans[a][b] += 1
-    trans_df = pd.DataFrame(trans).T.reindex(top8)[top8]
-
-    fig3, ax3 = plt.subplots(figsize=(9, 5))
-    fig3.patch.set_facecolor('#1B2E45')
-    ax3.set_facecolor('#1B2E45')
-    sns.heatmap(trans_df, ax=ax3, cmap='YlOrBr', annot=True, fmt='d',
-                linewidths=0.5, linecolor='#0D1B2A')
-    ax3.set_title('Genre Transition Matrix — Captures Mood Shifts', color='white', fontsize=12)
-    ax3.tick_params(colors='white', labelsize=9)
-    ax3.set_xlabel('Next Genre', color='#E8A027')
-    ax3.set_ylabel('Current Genre', color='#E8A027')
-    plt.tight_layout()
-    st.pyplot(fig3)
-    plt.close()
-    st.caption("*This matrix shows how users transition between genres — the foundation for LSTM mood-shift modeling*")
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 3 — MODEL PERFORMANCE
@@ -522,14 +472,6 @@ with tab3:
         }
         st.dataframe(pd.DataFrame(arch_data), use_container_width=True, hide_index=True)
 
-        st.markdown("#### ⚙️ Hyperparameters")
-        params = {
-            "Parameter"  : ["Sequence Length","Embedding Size","LSTM Units",
-                            "Dropout","Batch Size","Max Epochs","Optimizer","Loss Function"],
-            "Value"      : ["10","50","128 × 2","0.2","64","50","Adam","Categorical Cross-Entropy"]
-        }
-        st.dataframe(pd.DataFrame(params), use_container_width=True, hide_index=True)
-
     with col_metrics:
         st.markdown("#### 📊 Evaluation Metrics")
         from sklearn.metrics import precision_score, recall_score
@@ -549,24 +491,6 @@ with tab3:
                 <span style='color:#E8EDF5; font-size:1rem;'>{metric}</span>
                 <span style='color:{color}; font-size:1.3rem; font-weight:900;'>{value}</span>
             </div>""", unsafe_allow_html=True)
-
-        st.markdown("#### 📈 Per-Genre Performance (Top 10)")
-        from sklearn.metrics import classification_report
-        present = sorted(set(y_true))
-        names   = [le.inverse_transform([i])[0] for i in present]
-        report  = classification_report(y_true, y_pred, labels=present,
-                                        target_names=names, output_dict=True,
-                                        zero_division=0)
-        rows = []
-        for g in names:
-            if g in report:
-                rows.append({"Genre": g,
-                             "Precision": f"{report[g]['precision']*100:.1f}%",
-                             "Recall":    f"{report[g]['recall']*100:.1f}%",
-                             "F1":        f"{report[g]['f1-score']*100:.1f}%",
-                             "Support":   int(report[g]['support'])})
-        st.dataframe(pd.DataFrame(rows).head(10),
-                     use_container_width=True, hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -591,9 +515,6 @@ with tab4:
         }
         st.dataframe(pd.DataFrame(cmp_data), use_container_width=True, hide_index=True)
 
-        st.success(f"🏆 CineMate achieves **{acc*100:.2f}% accuracy** — highest among all baselines, "
-                   f"with unique mood-shift (temporal) modeling.")
-
     with col_cmp2:
         # Comparison bar chart
         fig4, ax4 = plt.subplots(figsize=(7, 5))
@@ -617,26 +538,6 @@ with tab4:
         plt.tight_layout()
         st.pyplot(fig4)
         plt.close()
-
-    st.markdown("#### 🔍 Research Gaps & CineMate Solutions")
-    gaps = [
-        ("❌ CF cannot handle evolving preferences",
-         "✅ RNN-LSTM captures sequential user behavior"),
-        ("❌ CBF relies on narrow feature set",
-         "✅ LSTM analyzes broader genre-level contextual data"),
-        ("❌ Hybrid models lack feedback mechanisms",
-         "✅ Mood-based genre dynamics enable continuous learning"),
-        ("❌ Traditional RNNs suffer vanishing gradients",
-         "✅ LSTM gates mitigate long-range dependency issues"),
-    ]
-    for gap, sol in gaps:
-        c1g, c2g = st.columns(2)
-        c1g.markdown(f"<div style='background:#2A0A0A;border-left:3px solid #E74C3C;"
-                     f"border-radius:6px;padding:10px;margin:4px 0;color:#FFC0C0;"
-                     f"font-size:0.9rem;'>{gap}</div>", unsafe_allow_html=True)
-        c2g.markdown(f"<div style='background:#0A2510;border-left:3px solid #2ECC71;"
-                     f"border-radius:6px;padding:10px;margin:4px 0;color:#90EE90;"
-                     f"font-size:0.9rem;'>{sol}</div>", unsafe_allow_html=True)
 
 # ─── Footer ───────────────────────────────────────────────────────────────────
 st.markdown("---")
